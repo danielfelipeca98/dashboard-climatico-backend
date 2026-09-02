@@ -48,15 +48,12 @@ class ClimateService:
 
     async def get_all_climate_data(self) -> ClimateResponse:
         results = []
-        tasks = []
+        
         for city in self.cities:
-            task = self.get_city_climate(
+            climate_data = await self.get_city_climate(
                 city.coordinates.lat,
                 city.coordinates.lon
             )
-            tasks.append(task)
-        climate_data_list = await asyncio.gather(*tasks)
-        for city, climate_data in zip(self.cities, climate_data_list):
             if climate_data:
                 results.append(CityClimate(
                     city=city.name,
@@ -65,7 +62,7 @@ class ClimateService:
                         temperature=climate_data['current_weather']['temperature'],
                         weather_code=climate_data['current_weather']['weathercode'],
                         wind_speed=climate_data['current_weather']['windspeed'],
-                        wind_direction=climate_data['hourly']['wind_direction_10m'][0],            
+                        wind_direction=climate_data['hourly']['wind_direction_10m'][0],
                         timestamp=climate_data['current_weather']['time']
                     ),
                     daily=DailyWeather(
@@ -75,6 +72,9 @@ class ClimateService:
                         dates=climate_data['daily']['time']
                     )
                 ))
+            
+            await asyncio.sleep(1.5)
+        
         return ClimateResponse(
             timestamp=datetime.now().isoformat(),
             cities=results
