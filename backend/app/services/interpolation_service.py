@@ -89,6 +89,8 @@ class InterpolationService:
         Returns:
             Valor interpolado (temperatura o precipitación)
         """
+        if not city_data:
+            return 0.0
         
         numerador = 0.0
         denominador = 0.0
@@ -125,13 +127,16 @@ class InterpolationService:
         Returns:
             Lista de HeatmapPoint con todos los puntos para el mapa
         """
-        
+        if not climate_data.cities:
+            return []
+    
         city_data_temp = []
         city_data_precip = []
         city_data_wind_speed = []
         city_data_wind_direction = []
         
         for city in climate_data.cities:
+            print(city.current.temperature)
             city_data_temp.append({
                 'lat': city.coordinates.lat,
                 'lon': city.coordinates.lon,
@@ -206,6 +211,12 @@ class InterpolationService:
             - cities: Lista de HeatmapPoint (ciudades reales)
             - total_points: Número total de puntos
         """
+        if not climate_data.cities:
+            return {
+                'interpolated': [],
+                'cities': [],
+                'total_points': 0
+            }
         
         heatmap_points = self.generate_heatmap_points(climate_data)
         
