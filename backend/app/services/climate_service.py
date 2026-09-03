@@ -3,7 +3,7 @@ import asyncio
 from typing import List, Dict, Optional
 from datetime import datetime
 from app.core.config import settings
-from app.models.city import City,Coordinates
+from app.models.city import City, Coordinates
 from app.models.climate import (
     CityClimate, CurrentWeather, DailyWeather,
     ClimateResponse, HeatmapPoint
@@ -20,15 +20,16 @@ class ClimateService:
     def _parse_cities(self, cities_str: str) -> List[City]:
         cities = []
         for city_str in cities_str.split('|'):
-            name,coords =city_str.split(':')
-            lat,lon = coords.split(',')
+            name, coords = city_str.split(':')
+            lat, lon = coords.split(',')
             cities.append(City(
                 name=name,
                 coordinates=Coordinates(lat=float(lat), lon=float(lon))
             ))
         return cities
 
-    async def get_city_climate(self, lat: float, lon: float) -> Dict:
+    async def get_city_climate(self, lat: float, lon: float, retries: int = 3) -> Optional[Dict]:
+        """Obtener clima con reintentos en caso de error 429"""
         params = {
             'latitude': lat,
             'longitude': lon,
@@ -38,13 +39,26 @@ class ClimateService:
             'timezone': 'America/Bogota',
             'forecast_days': 7
         }
-        try:
-            response = await self.client.get(self.api_url, params=params)
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as e:
-            print(f" Error obteniendo clima: {e}")
-            return None
+        
+        for attempt in range(retries):
+            try:
+                response = await self.client.get(self.api_url, params=params)
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    wait_time = 5 * (attempt + 1)  # 5s, 10s, 15s
+                    print(f" 429 en {lat},{lon}. Reintentando en {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                print(f" Error HTTP en {lat},{lon}: {e}")
+                return None
+            except httpx.HTTPError as e:
+                print(f" Error en {lat},{lon}: {e}")
+                return None
+        
+        print(f" Falló después de {retries} intentos para {lat},{lon}")
+        return None
 
     async def get_all_climate_data(self) -> ClimateResponse:
         results = []
@@ -73,7 +87,7 @@ class ClimateService:
                     )
                 ))
             
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(3)
         
         return ClimateResponse(
             timestamp=datetime.now().isoformat(),
@@ -87,8 +101,8 @@ class ClimateService:
                 lat=city.coordinates.lat,
                 lon=city.coordinates.lon,
                 temp=city.current.temperature,
-                wind_speed=city.current.wind_speed,         
-                wind_direction=city.current.wind_direction,     
+                wind_speed=city.current.wind_speed,
+                wind_direction=city.current.wind_direction,
                 precipitation=city.daily.precipitation[0] if city.daily.precipitation else 0,
                 city=city.city
             ))
