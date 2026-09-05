@@ -1,4 +1,5 @@
 from fastapi import APIRouter,Depends,Query
+from fastapi.middleware.cors import CORSMiddleware
 from app.services.climate_service import ClimateService
 from app.services.interpolation_service import InterpolationService
 from app.core.config import settings

@@ -1,5 +1,6 @@
 from math import radians, sin, cos, sqrt, atan2
 from typing import List,Tuple,Dict
+from shapely.geometry import Point, Polygon
 from app.models.climate import HeatmapPoint
 from app.services.climate_service import ClimateResponse
 
@@ -11,9 +12,51 @@ class InterpolationService:
         self.lat_max = 12.5
         self.lon_min = -79.0
         self.lon_max = -67.0
-        self.grid_resolution = 40
+        self.grid_resolution = 100 
         self.power = 2
         self.max_distance = 500
+
+        # Límite real de Colombia (continental), en pares (lon, lat) —
+        # la misma convención que usa Shapely — tomado de un dataset público
+        # basado en Natural Earth. Reemplaza la aproximación anterior (una
+        # diagonal recta dibujada a mano que cortaba de raíz media Amazonía
+        # y buena parte del Pacífico como si fueran "afuera" de Colombia).
+        # No incluye San Andrés y Providencia (están fuera del bbox de la
+        # grilla, lon_min=-79).
+        colombia_coords = [
+            (-71.56, 12.45), (-71.32, 11.85), (-71.98, 11.66), (-72.49, 11.12),
+            (-73.38, 9.17), (-72.78, 9.08), (-72.0, 7.02), (-70.12, 6.98),
+            (-69.25, 6.08), (-67.45, 6.19), (-67.86, 4.56), (-67.29, 3.4),
+            (-67.83, 2.83), (-67.19, 2.39), (-66.87, 1.22), (-67.42, 2.14),
+            (-67.91, 1.75), (-69.85, 1.71), (-69.84, 1.07), (-69.12, 0.65),
+            (-70.04, 0.59), (-69.38, -1.34), (-69.96, -4.24), (-70.72, -3.78),
+            (-70.29, -2.51), (-71.7, -2.15), (-72.88, -2.51), (-73.56, -1.37),
+            (-75.29, -0.12), (-77.38, 0.38), (-78.59, 1.24), (-78.81, 1.44),
+            (-78.57, 2.43), (-77.74, 2.6), (-77.03, 3.92), (-77.43, 4.03),
+            (-77.34, 6.57), (-77.89, 7.23), (-77.22, 7.94), (-77.37, 8.67),
+            (-76.76, 7.92), (-76.93, 8.57), (-75.63, 9.45), (-75.27, 10.8),
+            (-74.86, 11.13), (-74.39, 10.74), (-74.16, 11.33), (-73.28, 11.3),
+            (-71.56, 12.45),
+        ]
+        self.COLOMBIA_POLYGON = Polygon(colombia_coords)
+        if not self.COLOMBIA_POLYGON.is_valid:
+            # buffer(0) es el truco estándar de Shapely para reparar
+            # geometrías con auto-intersecciones menores sin cambiar su forma
+            self.COLOMBIA_POLYGON = self.COLOMBIA_POLYGON.buffer(0)
+    
+    def filter_colombia_points(self, points):
+        """
+        Filtra puntos (lat, lon) que caen dentro del polígono de Colombia.
+
+        OJO: Shapely usa la convención (x, y) = (lon, lat), pero los puntos
+        de la grilla vienen como (lat, lon) (ver generate_grid). Si se pasa
+        el tuple directo a Point(), los ejes quedan invertidos respecto al
+        polígono (que sí está en lon/lat) y CONTAINS() nunca es True para
+        ningún punto: el mapa interpolado sale completamente vacío. Por eso
+        se invierte aquí el orden antes de construir el Point.
+        """
+        colombia = self.COLOMBIA_POLYGON
+        return [p for p in points if colombia.contains(Point(p[1], p[0]))]
 
     def haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:     
         R = 6371
@@ -50,31 +93,15 @@ class InterpolationService:
 
     def filter_land_points(self, points):
         """
-        Filtrar puntos en el mar.
-        Mantiene solo los puntos que están en tierra firme.
+        [OBSOLETO] Ya no se usa. Antes filtraba puntos "en el mar" con tres
+        rectángulos aproximados a mano, pero eran tan imprecisos que también
+        excluían tierra firme real (gran parte de la costa Pacífica de Chocó
+        y Nariño caía dentro de esos rectángulos). Con COLOMBIA_POLYGON
+        ahora usando el límite geográfico real, filter_colombia_points ya
+        excluye correctamente mar y países vecinos por sí solo — este método
+        se deja sin uso por si algún otro código todavía lo importa.
         """
-        
-        
-        zonas_mar = [
-            {'lat_min': -4.0, 'lat_max': 8.0, 'lon_min': -79.0, 'lon_max': -77.5},
-            {'lat_min': 10.0, 'lat_max': 12.5, 'lon_min': -76.0, 'lon_max': -71.0},
-            {'lat_min': -4.0, 'lat_max': 6.0, 'lon_min': -68.0, 'lon_max': -67.0},
-        ]
-        
-        puntos_tierra = []
-        
-        for lat, lon in points:
-            es_mar = False  
-            for zona in zonas_mar:
-                if (zona['lat_min'] <= lat <= zona['lat_max'] and 
-                    zona['lon_min'] <= lon <= zona['lon_max']):
-                    es_mar = True  
-                    break  
-            
-            if not es_mar:
-                puntos_tierra.append((lat, lon))
-        
-        return puntos_tierra
+        return points
 
     def interpolate_value(self, lat: float, lon: float, city_data: List[Dict], max_distance: float) -> float:
         """
@@ -161,12 +188,12 @@ class InterpolationService:
                 'value': city.current.wind_direction
             })
         
-        grid_points = self.generate_grid()        
-        land_points = self.filter_land_points(grid_points)
+        grid_points = self.generate_grid()
+        colombia_points = self.filter_colombia_points(grid_points)
         
         heatmap_points = []
         
-        for lat, lon in land_points:
+        for lat, lon in colombia_points:
             temp = self.interpolate_value(lat, lon, city_data_temp, self.max_distance)            
             precip = self.interpolate_value(lat, lon, city_data_precip, self.max_distance)
             wind_speed = self.interpolate_value(lat, lon, city_data_wind_speed, self.max_distance) 
@@ -234,5 +261,3 @@ class InterpolationService:
             'cities': city_points,
             'total_points': len(heatmap_points)
         }
-
-            
