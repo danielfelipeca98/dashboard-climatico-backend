@@ -1,5 +1,7 @@
 import httpx
 import asyncio
+import json
+from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 from app.core.config import settings
@@ -12,7 +14,16 @@ from app.models.climate import (
 class ClimateService:
     """Servicio para obtener datos climáticos de Open-Meteo con UNA SOLA PETICIÓN BATCH"""
 
+    # Cuánto tiempo se sigue sirviendo el último batch bueno como fallback
+    # mientras Open-Meteo está caído/bloqueado. Pasado esto, se prefiere
+    # devolver una respuesta vacía y explícita antes que un dato demasiado
+    # viejo para un dashboard climático "en vivo".
     CACHE_MAX_AGE = timedelta(minutes=45)
+
+    # Archivo donde se persiste el último batch bueno, para sobrevivir a un
+    # restart del proceso (no a un redeploy/spin-down de Render — ver nota
+    # en la respuesta de arriba).
+    CACHE_FILE = Path(__file__).resolve().parent / ".climate_cache.json"
 
     def __init__(self):
         self.api_url = settings.CLIMATE_API_URL
@@ -21,6 +32,7 @@ class ClimateService:
         self._last_good_batch: Optional[List[Dict]] = None
         self._last_good_at: Optional[datetime] = None
         self._last_call_was_stale: bool = False
+        self._load_cache_from_disk()
 
     @property
     def last_updated_at(self) -> Optional[datetime]:
@@ -31,6 +43,42 @@ class ClimateService:
     def is_serving_stale_data(self) -> bool:
         """True si la última llamada a get_batch_climate_data devolvió caché, no datos frescos."""
         return self._last_call_was_stale
+
+    def _load_cache_from_disk(self) -> None:
+        """Carga el caché guardado en disco (si existe) al arrancar el servicio."""
+        try:
+            if not self.CACHE_FILE.exists():
+                print("💾 No hay caché en disco (primer arranque o filesystem nuevo)")
+                return
+
+            with open(self.CACHE_FILE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+
+            self._last_good_batch = payload["batch_data"]
+            self._last_good_at = datetime.fromisoformat(payload["saved_at"])
+
+            age_min = int((datetime.now() - self._last_good_at).total_seconds() // 60)
+            print(f"💾 Caché cargado desde disco (guardado hace {age_min} min, {len(self._last_good_batch)} ciudades)")
+        except Exception as e:
+            print(f"⚠️ No se pudo cargar el caché desde disco: {e}")
+            self._last_good_batch = None
+            self._last_good_at = None
+
+    def _save_cache_to_disk(self) -> None:
+        """Persiste el último batch bueno a disco (sobrescribe el archivo anterior)."""
+        if self._last_good_batch is None or self._last_good_at is None:
+            return
+        try:
+            payload = {
+                "saved_at": self._last_good_at.isoformat(),
+                "batch_data": self._last_good_batch,
+            }
+            with open(self.CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+        except Exception as e:
+            # No dejamos que un fallo al escribir el caché tumbe la
+            # petición: el dato ya está bien en memoria de todas formas.
+            print(f"⚠️ No se pudo guardar el caché en disco: {e}")
 
     def _parse_cities(self, cities_str: str) -> List[City]:
         cities = []
@@ -78,6 +126,24 @@ class ClimateService:
 
         return cities
 
+    def _log_error_body(self, e: httpx.HTTPStatusError) -> str:
+        """
+        Extrae el mensaje real que manda Open-Meteo en el cuerpo del error
+        (campo 'reason'), que es donde dice explícitamente si el límite
+        golpeado fue por minuto, por hora o por día. El código de estado
+        HTTP solo (429/503) no distingue eso.
+        """
+        try:
+            body = e.response.json()
+            reason = body.get('reason')
+            if reason:
+                return reason
+        except Exception:
+            pass
+
+        text = (e.response.text or '').strip()
+        return text[:300] if text else '(sin cuerpo de respuesta)'
+
     async def get_batch_climate_data(self, retries: int = 2) -> Optional[List[Dict]]:
         """
         Obtiene datos de TODAS las ciudades en UNA SOLA petición.
@@ -89,7 +155,7 @@ class ClimateService:
         viendo un mapa, aunque un poco viejo, en vez de una pantalla vacía.
 
         Los reintentos de ESTA función son deliberadamente cortos (segundos,
-        no los 5-15 minutos que puede durar un 503 de Open-Meteo): corren
+        no los 5-15 minutos que puede durar un bloqueo de Open-Meteo): corren
         dentro de una petición HTTP en vivo del propio frontend. La
         recuperación ante un apagón largo viene de que este método se
         vuelve a llamar en el siguiente ciclo (UPDATE_INTERVAL) — si para
@@ -122,32 +188,40 @@ class ClimateService:
 
                 if not isinstance(data, list):
                     print(f" La respuesta no es una lista, es {type(data)}")
-                    break  
+                    break  # error de formato, no de disponibilidad: reintentar no ayuda
 
                 print(f" Datos recibidos: {len(data)} resultados")
                 self._last_good_batch = data
                 self._last_good_at = datetime.now()
                 self._last_call_was_stale = False
+                self._save_cache_to_disk()
                 return data
 
             except httpx.HTTPStatusError as e:
+                reason = self._log_error_body(e)
+
                 if e.response.status_code == 429:
                     wait_time = 3 * (attempt + 1)
-                    print(f" 429 en petición batch. Reintentando en {wait_time}s...")
+                    print(f" 429 en petición batch — motivo de Open-Meteo: '{reason}'. "
+                          f"Reintentando en {wait_time}s...")
                     await asyncio.sleep(wait_time)
                     continue
                 elif e.response.status_code == 503:
                     wait_time = 5 * (attempt + 1)
-                    print(f" 503 en petición batch. Reintentando en {wait_time}s...")
+                    print(f" 503 en petición batch — cuerpo: '{reason}'. "
+                          f"Reintentando en {wait_time}s...")
                     await asyncio.sleep(wait_time)
                     continue
-                print(f" Error HTTP en petición batch: {e}")
+
+                print(f" Error HTTP {e.response.status_code} en petición batch — cuerpo: '{reason}'")
                 break
             except httpx.HTTPError as e:
                 print(f" Error en petición batch: {e}")
                 break
 
-        
+        # Se agotaron los reintentos rápidos, o hubo un error no
+        # recuperable reintentando: caemos al último dato bueno, si existe
+        # y no es demasiado viejo para seguir siendo útil.
         if self._last_good_batch is not None and self._last_good_at is not None:
             age = datetime.now() - self._last_good_at
             minutes = int(age.total_seconds() // 60)
@@ -169,7 +243,7 @@ class ClimateService:
             current = city_data['current_weather']
             daily = city_data['daily']
             hourly = city_data.get('hourly', {})
-            
+
             wind_dirs = hourly.get('wind_direction_10m', [0.0]) if hourly else [0.0]
 
             return CityClimate(
