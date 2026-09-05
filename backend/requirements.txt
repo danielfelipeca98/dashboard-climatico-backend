@@ -8,3 +8,4 @@ pydantic-settings==2.1.0
 geopy==2.4.1        # Para geocodificación
 pytest==7.4.3
 pytest-asyncio==0.21.1
+shapely==2.0.6
