@@ -12,10 +12,6 @@ from app.models.climate import (
 class ClimateService:
     """Servicio para obtener datos climáticos de Open-Meteo con UNA SOLA PETICIÓN BATCH"""
 
-    # Cuánto tiempo se sigue sirviendo el último batch bueno como fallback
-    # mientras Open-Meteo está caído (429/503/lo que sea). Pasado esto, se
-    # prefiere devolver una respuesta vacía y explícita antes que un dato
-    # demasiado viejo para un dashboard climático "en vivo".
     CACHE_MAX_AGE = timedelta(minutes=45)
 
     def __init__(self):
@@ -47,7 +43,7 @@ class ClimateService:
                 continue
 
             if ':' not in city_str:
-                print(f"⚠️ [CITIES #{index}] Formato incorrecto (falta ':'): '{city_str}'")
+                print(f" [CITIES #{index}] Formato incorrecto (falta ':'): '{city_str}'")
                 continue
 
             name, coords = city_str.rsplit(':', 1)
@@ -55,11 +51,11 @@ class ClimateService:
             coords = coords.strip()
 
             if not name:
-                print(f"⚠️ [CITIES #{index}] Nombre vacío en: '{city_str}'")
+                print(f" [CITIES #{index}] Nombre vacío en: '{city_str}'")
                 continue
 
             if ',' not in coords:
-                print(f"⚠️ [CITIES #{index}] Coordenadas incorrectas: '{coords}'")
+                print(f" [CITIES #{index}] Coordenadas incorrectas: '{coords}'")
                 continue
 
             lat_str, lon_str = coords.split(',', 1)
@@ -67,7 +63,7 @@ class ClimateService:
                 lat = float(lat_str.strip())
                 lon = float(lon_str.strip())
             except ValueError:
-                print(f"⚠️ [CITIES #{index}] Lat/lon no numéricos: '{coords}'")
+                print(f" [CITIES #{index}] Lat/lon no numéricos: '{coords}'")
                 continue
 
             cities.append(City(
@@ -76,9 +72,9 @@ class ClimateService:
             ))
 
         if not cities:
-            print("⚠️ ADVERTENCIA: no se pudo parsear ninguna ciudad desde CITIES.")
+            print(" ADVERTENCIA: no se pudo parsear ninguna ciudad desde CITIES.")
         else:
-            print(f"✅ {len(cities)} ciudades cargadas correctamente")
+            print(f" {len(cities)} ciudades cargadas correctamente")
 
         return cities
 
@@ -101,7 +97,7 @@ class ClimateService:
         sigue sirviendo el fallback hasta CACHE_MAX_AGE.
         """
         if not self.cities:
-            print("❌ No hay ciudades configuradas")
+            print(" No hay ciudades configuradas")
             return None
 
         lats = ','.join(str(city.coordinates.lat) for city in self.cities)
@@ -119,16 +115,16 @@ class ClimateService:
 
         for attempt in range(retries):
             try:
-                print(f"📡 Solicitando datos para {len(self.cities)} ciudades...")
+                print(f" Solicitando datos para {len(self.cities)} ciudades...")
                 response = await self.client.get(self.api_url, params=params)
                 response.raise_for_status()
                 data = response.json()
 
                 if not isinstance(data, list):
-                    print(f"❌ La respuesta no es una lista, es {type(data)}")
-                    break  # error de formato, no de disponibilidad: reintentar no ayuda
+                    print(f" La respuesta no es una lista, es {type(data)}")
+                    break  
 
-                print(f"✅ Datos recibidos: {len(data)} resultados")
+                print(f" Datos recibidos: {len(data)} resultados")
                 self._last_good_batch = data
                 self._last_good_at = datetime.now()
                 self._last_call_was_stale = False
@@ -137,36 +133,34 @@ class ClimateService:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429:
                     wait_time = 3 * (attempt + 1)
-                    print(f"⚠️ 429 en petición batch. Reintentando en {wait_time}s...")
+                    print(f" 429 en petición batch. Reintentando en {wait_time}s...")
                     await asyncio.sleep(wait_time)
                     continue
                 elif e.response.status_code == 503:
                     wait_time = 5 * (attempt + 1)
-                    print(f"⚠️ 503 en petición batch. Reintentando en {wait_time}s...")
+                    print(f" 503 en petición batch. Reintentando en {wait_time}s...")
                     await asyncio.sleep(wait_time)
                     continue
-                print(f"❌ Error HTTP en petición batch: {e}")
+                print(f" Error HTTP en petición batch: {e}")
                 break
             except httpx.HTTPError as e:
-                print(f"❌ Error en petición batch: {e}")
+                print(f" Error en petición batch: {e}")
                 break
 
-        # Se agotaron los reintentos rápidos, o hubo un error no
-        # recuperable reintentando: caemos al último dato bueno, si existe
-        # y no es demasiado viejo para seguir siendo útil.
+        
         if self._last_good_batch is not None and self._last_good_at is not None:
             age = datetime.now() - self._last_good_at
             minutes = int(age.total_seconds() // 60)
             if age <= self.CACHE_MAX_AGE:
-                print(f"♻️ Open-Meteo no responde. Sirviendo caché de hace {minutes} min como fallback.")
+                print(f" Open-Meteo no responde. Sirviendo caché de hace {minutes} min como fallback.")
                 self._last_call_was_stale = True
                 return self._last_good_batch
             else:
                 max_minutes = int(self.CACHE_MAX_AGE.total_seconds() // 60)
-                print(f"❌ Open-Meteo no responde y el caché tiene {minutes} min "
+                print(f" Open-Meteo no responde y el caché tiene {minutes} min "
                       f"(> {max_minutes} min máx). Se descarta por ser demasiado viejo.")
 
-        print(f"❌ Falló después de {retries} intentos y no hay caché útil disponible")
+        print(f" Falló después de {retries} intentos y no hay caché útil disponible")
         return None
 
     def _extract_city_data(self, city: City, city_data: Dict) -> Optional[CityClimate]:
@@ -196,7 +190,7 @@ class ClimateService:
                 )
             )
         except (KeyError, IndexError, TypeError) as e:
-            print(f"⚠️ Error parseando datos de {city.name}: {e}")
+            print(f" Error parseando datos de {city.name}: {e}")
             return None
 
     async def get_all_climate_data(self) -> ClimateResponse:
@@ -204,7 +198,7 @@ class ClimateService:
         batch_data = await self.get_batch_climate_data()
 
         if not batch_data:
-            print("❌ No se pudieron obtener datos de Open-Meteo")
+            print(" No se pudieron obtener datos de Open-Meteo")
             return ClimateResponse(
                 timestamp=datetime.now().isoformat(),
                 cities=[],
@@ -213,7 +207,7 @@ class ClimateService:
             )
 
         if len(batch_data) != len(self.cities):
-            print(f"⚠️ Número de resultados ({len(batch_data)}) no coincide con ciudades ({len(self.cities)})")
+            print(f" Número de resultados ({len(batch_data)}) no coincide con ciudades ({len(self.cities)})")
 
         results = []
         for i, city in enumerate(self.cities):
@@ -222,9 +216,9 @@ class ClimateService:
                 if city_climate:
                     results.append(city_climate)
             else:
-                print(f"⚠️ No hay datos para {city.name}")
+                print(f" No hay datos para {city.name}")
 
-        print(f"✅ {len(results)} ciudades procesadas correctamente")
+        print(f" {len(results)} ciudades procesadas correctamente")
         return ClimateResponse(
             timestamp=datetime.now().isoformat(),
             cities=results,

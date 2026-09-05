@@ -16,13 +16,6 @@ class InterpolationService:
         self.power = 2
         self.max_distance = 500
 
-        # Límite real de Colombia (continental), en pares (lon, lat) —
-        # la misma convención que usa Shapely — tomado de un dataset público
-        # basado en Natural Earth. Reemplaza la aproximación anterior (una
-        # diagonal recta dibujada a mano que cortaba de raíz media Amazonía
-        # y buena parte del Pacífico como si fueran "afuera" de Colombia).
-        # No incluye San Andrés y Providencia (están fuera del bbox de la
-        # grilla, lon_min=-79).
         colombia_coords = [
             (-71.56, 12.45), (-71.32, 11.85), (-71.98, 11.66), (-72.49, 11.12),
             (-73.38, 9.17), (-72.78, 9.08), (-72.0, 7.02), (-70.12, 6.98),
@@ -40,8 +33,7 @@ class InterpolationService:
         ]
         self.COLOMBIA_POLYGON = Polygon(colombia_coords)
         if not self.COLOMBIA_POLYGON.is_valid:
-            # buffer(0) es el truco estándar de Shapely para reparar
-            # geometrías con auto-intersecciones menores sin cambiar su forma
+            
             self.COLOMBIA_POLYGON = self.COLOMBIA_POLYGON.buffer(0)
     
     def filter_colombia_points(self, points):

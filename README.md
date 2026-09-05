@@ -21,6 +21,27 @@ Dashboard interactivo que muestra el clima en tiempo real para Colombia utilizan
 
 ---
 
+##  Resiliencia y Manejo de Errores
+
+El sistema está diseñado para ser **robusto y tolerante a fallos**:
+
+- **Caché en memoria**: Si Open-Meteo falla (429/503), el sistema sirve los últimos datos válidos durante 45 minutos.
+- **Reintentos inteligentes**: Reintentos con backoff para errores 429 y 503.
+- **Una sola petición batch**: 41 ciudades en 1 petición (no 41 peticiones individuales).
+- **Actualización cada 20 minutos**: Respetando los límites de Open-Meteo (10,000 peticiones/día).
+
+### Límites de Open-Meteo (Free Tier)
+
+| Límite | Valor |
+|--------|-------|
+| Peticiones por día | 10,000 |
+| Peticiones por hora | 5,000 |
+| Peticiones por minuto | 600 |
+
+**Configuración actual:**
+- 1 petición cada 20 minutos = 72 peticiones/día
+- Muy por debajo de los límites → sin riesgo de bloqueo
+
 ##  Tecnologías
 
 ### Backend
