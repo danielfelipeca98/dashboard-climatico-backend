@@ -20,6 +20,15 @@ class ClimateService:
     # viejo para un dashboard climático "en vivo".
     CACHE_MAX_AGE = timedelta(minutes=45)
 
+    # Cooldown independiente del TTL de éxito: si el ÚLTIMO INTENTO (haya
+    # tenido éxito o no) fue hace menos de esto, no se vuelve a llamar a
+    # Open-Meteo. Sin esto, el TTL de abajo NO protege durante un apagón:
+    # como se basa en el último dato BUENO, y durante un apagón nunca hay
+    # uno reciente, cada request seguiría reintentando contra Open-Meteo
+    # sin límite — justo el patrón que puede alargar un bloqueo o generar
+    # uno nuevo cuando la API vuelve (varios requests reintentando a la vez).
+    FAILURE_COOLDOWN = timedelta(seconds=30)
+
     # Archivo donde se persiste el último batch bueno, para sobrevivir a un
     # restart del proceso (no a un redeploy/spin-down de Render — ver nota
     # en la respuesta de arriba).
@@ -32,6 +41,13 @@ class ClimateService:
         self._last_good_batch: Optional[List[Dict]] = None
         self._last_good_at: Optional[datetime] = None
         self._last_call_was_stale: bool = False
+        self._last_attempt_at: Optional[datetime] = None
+        # TTL real: mientras el último dato bueno tenga menos de
+        # UPDATE_INTERVAL segundos, se sirve tal cual y NO se llama a
+        # Open-Meteo — sin esto, cada hit a /api/climate/all (una pestaña,
+        # un refresh, un bot de monitoreo, N usuarios a la vez) dispara una
+        # petición nueva a Open-Meteo sin relación con UPDATE_INTERVAL.
+        self._min_refresh_interval = timedelta(seconds=settings.UPDATE_INTERVAL)
         self._load_cache_from_disk()
 
     @property
@@ -165,6 +181,37 @@ class ClimateService:
         if not self.cities:
             print(" No hay ciudades configuradas")
             return None
+
+        # TTL de éxito: si el último dato BUENO todavía está dentro de
+        # UPDATE_INTERVAL, se sirve directo — esto es lo que evita que 10,
+        # 50 o 500 hits al endpoint en el mismo minuto se traduzcan en 10,
+        # 50 o 500 peticiones reales a Open-Meteo.
+        if self._last_good_batch is not None and self._last_good_at is not None:
+            age = datetime.now() - self._last_good_at
+            if age < self._min_refresh_interval:
+                print(f" Usando caché vigente (hace {int(age.total_seconds())}s, "
+                      f"TTL={int(self._min_refresh_interval.total_seconds())}s) — no se llama a Open-Meteo")
+                self._last_call_was_stale = False
+                return self._last_good_batch
+
+        # Cooldown de fallo: el TTL de arriba SOLO protege cuando hay un
+        # dato bueno reciente. Durante un apagón nunca lo hay, así que sin
+        # este segundo chequeo, cada request seguiría intentando contra
+        # Open-Meteo sin límite. Si el último INTENTO (haya fallado o no)
+        # fue hace muy poco, no se reintenta — se sirve lo que haya.
+        if self._last_attempt_at is not None:
+            since_attempt = datetime.now() - self._last_attempt_at
+            if since_attempt < self.FAILURE_COOLDOWN:
+                print(f" Último intento hace {since_attempt.total_seconds():.0f}s "
+                      f"(< {int(self.FAILURE_COOLDOWN.total_seconds())}s de cooldown) — no se reintenta todavía")
+                if self._last_good_batch is not None and self._last_good_at is not None:
+                    age = datetime.now() - self._last_good_at
+                    if age <= self.CACHE_MAX_AGE:
+                        self._last_call_was_stale = True
+                        return self._last_good_batch
+                return None
+
+        self._last_attempt_at = datetime.now()
 
         lats = ','.join(str(city.coordinates.lat) for city in self.cities)
         lons = ','.join(str(city.coordinates.lon) for city in self.cities)
