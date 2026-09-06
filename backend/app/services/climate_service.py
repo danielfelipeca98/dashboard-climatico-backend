@@ -14,24 +14,13 @@ from app.models.climate import (
 class ClimateService:
     """Servicio para obtener datos climáticos de Open-Meteo con UNA SOLA PETICIÓN BATCH"""
 
-    # Cuánto tiempo se sigue sirviendo el último batch bueno como fallback
-    # mientras Open-Meteo está caído/bloqueado. Pasado esto, se prefiere
-    # devolver una respuesta vacía y explícita antes que un dato demasiado
-    # viejo para un dashboard climático "en vivo".
+    
     CACHE_MAX_AGE = timedelta(minutes=45)
 
-    # Cooldown independiente del TTL de éxito: si el ÚLTIMO INTENTO (haya
-    # tenido éxito o no) fue hace menos de esto, no se vuelve a llamar a
-    # Open-Meteo. Sin esto, el TTL de abajo NO protege durante un apagón:
-    # como se basa en el último dato BUENO, y durante un apagón nunca hay
-    # uno reciente, cada request seguiría reintentando contra Open-Meteo
-    # sin límite — justo el patrón que puede alargar un bloqueo o generar
-    # uno nuevo cuando la API vuelve (varios requests reintentando a la vez).
+    
     FAILURE_COOLDOWN = timedelta(seconds=30)
 
-    # Archivo donde se persiste el último batch bueno, para sobrevivir a un
-    # restart del proceso (no a un redeploy/spin-down de Render — ver nota
-    # en la respuesta de arriba).
+    
     CACHE_FILE = Path(__file__).resolve().parent / ".climate_cache.json"
 
     def __init__(self):
@@ -42,11 +31,12 @@ class ClimateService:
         self._last_good_at: Optional[datetime] = None
         self._last_call_was_stale: bool = False
         self._last_attempt_at: Optional[datetime] = None
-        # TTL real: mientras el último dato bueno tenga menos de
-        # UPDATE_INTERVAL segundos, se sirve tal cual y NO se llama a
-        # Open-Meteo — sin esto, cada hit a /api/climate/all (una pestaña,
-        # un refresh, un bot de monitoreo, N usuarios a la vez) dispara una
-        # petición nueva a Open-Meteo sin relación con UPDATE_INTERVAL.
+        
+        self.weatherapi_key = getattr(settings, "WEATHERAPI_KEY", "")
+        self.weatherapi_url = getattr(
+            settings, "WEATHERAPI_URL", "https://api.weatherapi.com/v1/forecast.json"
+        )
+        
         self._min_refresh_interval = timedelta(seconds=settings.UPDATE_INTERVAL)
         self._load_cache_from_disk()
 
@@ -64,7 +54,7 @@ class ClimateService:
         """Carga el caché guardado en disco (si existe) al arrancar el servicio."""
         try:
             if not self.CACHE_FILE.exists():
-                print("💾 No hay caché en disco (primer arranque o filesystem nuevo)")
+                print(" No hay caché en disco (primer arranque o filesystem nuevo)")
                 return
 
             with open(self.CACHE_FILE, "r", encoding="utf-8") as f:
@@ -74,9 +64,9 @@ class ClimateService:
             self._last_good_at = datetime.fromisoformat(payload["saved_at"])
 
             age_min = int((datetime.now() - self._last_good_at).total_seconds() // 60)
-            print(f"💾 Caché cargado desde disco (guardado hace {age_min} min, {len(self._last_good_batch)} ciudades)")
+            print(f" Caché cargado desde disco (guardado hace {age_min} min, {len(self._last_good_batch)} ciudades)")
         except Exception as e:
-            print(f"⚠️ No se pudo cargar el caché desde disco: {e}")
+            print(f" No se pudo cargar el caché desde disco: {e}")
             self._last_good_batch = None
             self._last_good_at = None
 
@@ -92,9 +82,7 @@ class ClimateService:
             with open(self.CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(payload, f)
         except Exception as e:
-            # No dejamos que un fallo al escribir el caché tumbe la
-            # petición: el dato ya está bien en memoria de todas formas.
-            print(f"⚠️ No se pudo guardar el caché en disco: {e}")
+            print(f" No se pudo guardar el caché en disco: {e}")
 
     def _parse_cities(self, cities_str: str) -> List[City]:
         cities = []
@@ -182,10 +170,6 @@ class ClimateService:
             print(" No hay ciudades configuradas")
             return None
 
-        # TTL de éxito: si el último dato BUENO todavía está dentro de
-        # UPDATE_INTERVAL, se sirve directo — esto es lo que evita que 10,
-        # 50 o 500 hits al endpoint en el mismo minuto se traduzcan en 10,
-        # 50 o 500 peticiones reales a Open-Meteo.
         if self._last_good_batch is not None and self._last_good_at is not None:
             age = datetime.now() - self._last_good_at
             if age < self._min_refresh_interval:
@@ -194,11 +178,7 @@ class ClimateService:
                 self._last_call_was_stale = False
                 return self._last_good_batch
 
-        # Cooldown de fallo: el TTL de arriba SOLO protege cuando hay un
-        # dato bueno reciente. Durante un apagón nunca lo hay, así que sin
-        # este segundo chequeo, cada request seguiría intentando contra
-        # Open-Meteo sin límite. Si el último INTENTO (haya fallado o no)
-        # fue hace muy poco, no se reintenta — se sirve lo que haya.
+        
         if self._last_attempt_at is not None:
             since_attempt = datetime.now() - self._last_attempt_at
             if since_attempt < self.FAILURE_COOLDOWN:
@@ -266,9 +246,15 @@ class ClimateService:
                 print(f" Error en petición batch: {e}")
                 break
 
-        # Se agotaron los reintentos rápidos, o hubo un error no
-        # recuperable reintentando: caemos al último dato bueno, si existe
-        # y no es demasiado viejo para seguir siendo útil.
+        
+        weatherapi_batch = await self._fetch_batch_from_weatherapi()
+        if weatherapi_batch is not None:
+            self._last_good_batch = weatherapi_batch
+            self._last_good_at = datetime.now()
+            self._last_call_was_stale = False
+            self._save_cache_to_disk()
+            return weatherapi_batch
+
         if self._last_good_batch is not None and self._last_good_at is not None:
             age = datetime.now() - self._last_good_at
             minutes = int(age.total_seconds() // 60)
@@ -283,6 +269,76 @@ class ClimateService:
 
         print(f" Falló después de {retries} intentos y no hay caché útil disponible")
         return None
+
+    async def _fetch_one_from_weatherapi(self, city: City) -> Optional[Dict]:
+        """
+        Pide el clima de UNA ciudad a WeatherAPI.com y lo traduce a la MISMA
+        forma que ya devuelve Open-Meteo, para poder reusar
+        _extract_city_data tal cual, sin tocarlo.
+        """
+        params = {
+            'key': self.weatherapi_key,
+            'q': f"{city.coordinates.lat},{city.coordinates.lon}",
+            'days': 3, 
+            'aqi': 'no',
+            'alerts': 'no',
+        }
+        try:
+            response = await self.client.get(self.weatherapi_url, params=params)
+            response.raise_for_status()
+            wa = response.json()
+
+            current = wa['current']
+            forecastdays = wa['forecast']['forecastday']
+
+            return {
+                'current_weather': {
+                    'temperature': current['temp_c'],
+                    'weathercode': current['condition']['code'],
+                    'windspeed': current['wind_kph'],
+                    'time': current['last_updated'],
+                },
+                'hourly': {
+                    'wind_direction_10m': [current['wind_degree']],
+                },
+                'daily': {
+                    'temperature_2m_max': [d['day']['maxtemp_c'] for d in forecastdays],
+                    'temperature_2m_min': [d['day']['mintemp_c'] for d in forecastdays],
+                    'precipitation_sum': [d['day']['totalprecip_mm'] for d in forecastdays],
+                    'time': [d['date'] for d in forecastdays],
+                },
+            }
+        except Exception as e:
+            print(f" WeatherAPI.com falló para {city.name}: {e}")
+            return None
+
+    async def _fetch_batch_from_weatherapi(self) -> Optional[List[Dict]]:
+        """
+        Plan B cuando Open-Meteo no responde. WeatherAPI.com no ofrece una
+        llamada batch gratuita como Open-Meteo, así que esto es N requests
+        secuenciales (una por ciudad) con una pequeña pausa entre cada una
+        para no ráfaguear la API. Si no hay WEATHERAPI_KEY configurada,
+        devuelve None de inmediato (comportamiento actual sin cambios).
+        """
+        if not self.weatherapi_key:
+            return None
+
+        print(f" Open-Meteo no disponible — probando WeatherAPI.com como respaldo "
+              f"para {len(self.cities)} ciudades...")
+
+        results: List[Optional[Dict]] = []
+        for city in self.cities:
+            city_data = await self._fetch_one_from_weatherapi(city)
+            results.append(city_data)
+            await asyncio.sleep(0.3)
+
+        ok_count = sum(1 for r in results if r is not None)
+        if ok_count == 0:
+            print(" WeatherAPI.com tampoco respondió para ninguna ciudad")
+            return None
+
+        print(f" WeatherAPI.com respondió para {ok_count}/{len(self.cities)} ciudades")
+        return results
 
     def _extract_city_data(self, city: City, city_data: Dict) -> Optional[CityClimate]:
         """Extrae los datos de una ciudad desde su respuesta individual."""
